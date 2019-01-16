@@ -1,0 +1,10 @@
+[package]
+name = "converse"
+version = "0.1.0"
+authors = ["spowell <spowell>"]
+edition = "2018"
+
+[dependencies]
+serde_cbor = "0.9"
+serde = "1.0"
+ctrlc = "3.1"

@@ -1,0 +1,10 @@
+[package]
+name = "example"
+version = "0.1.0"
+authors = ["spowell <spowell>"]
+edition = "2018"
+
+[dependencies]
+converse = { path = "../converse/" }
+converse-derive = { path = "../converse-derive/" }
+serde_cbor = "0.9"
