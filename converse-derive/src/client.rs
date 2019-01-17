@@ -8,7 +8,6 @@ pub struct Client<'a> {
     state: common::StateImpl<'a>,
     methods: common::StateMethods<'a>,
     directory: String,
-    ty: TokenStream,
 }
 
 impl<'a> Client<'a> {
@@ -17,14 +16,10 @@ impl<'a> Client<'a> {
         let state = common::StateImpl::new(item);
         let methods = common::StateMethods::new(item);
 
-        let gen: TokenStream = state.params().into_iter().collect();
-        let ty = quote! { Client #gen };
-
         Client {
             state,
             methods,
             directory,
-            ty,
         }
     }
 }
@@ -36,11 +31,20 @@ impl<'a> Client<'a> {
         let initializer = self.initializer();
         let implementations = self.implementations();
 
-        let ty = &self.ty;
+        let gen = self.state.types().marked_generics();
+        let ty = quote!{ Client #gen };
+
+        let phantom = self.state.types().markers();
+        let markers: TokenStream = phantom.decls().iter().enumerate()
+            .map(|(i,x)| {
+                let id = syn::Ident::new(&format!("marker_{}", i), proc_macro2::Span::call_site());
+                quote! { #id: #x , }
+            }).collect();
 
         quote! {
             struct #ty {
                 proc: ::converse::procdir::ProcessDirectory,
+                #markers
             }
 
             #initializer
@@ -51,7 +55,20 @@ impl<'a> Client<'a> {
     fn initializer(&self) -> TokenStream {
         let dir = &self.directory;
         let impl_state = self.state.implement();
-        let ty = &self.ty;
+
+        let params: TokenStream = self.state.types().marked_params().into_iter()
+            .map(|x| quote!{ #x , })
+            .collect();
+        let gen = quote! { < #params > };
+        let ty = quote! { Client #gen };
+
+
+        let phantom = self.state.types().markers();
+        let markers: TokenStream = phantom.instances().iter().enumerate()
+            .map(|(i,x)| {
+                let id = syn::Ident::new(&format!("marker_{}", i), proc_macro2::Span::call_site());
+                quote! { #id: #x , }
+            }).collect();
 
         quote! {
             #impl_state {
@@ -70,6 +87,7 @@ impl<'a> Client<'a> {
 
                     Ok(Client {
                         proc: proc,
+                        #markers
                     })
                 }
             }
@@ -78,11 +96,17 @@ impl<'a> Client<'a> {
 
     fn implementations(&self) -> TokenStream {
 
-        let impl_state = self.state.fabricate(self.ty.clone());
+        let params: TokenStream = self.state.types().marked_params().into_iter()
+            .map(|x| quote!{ #x , })
+            .collect();
+        let gen = quote!{ < #params > };
+        let ty = quote! { Client #gen };
+        let impl_client = self.state.fabricate(ty);
+
         let endpoints = self.endpoints();
 
         quote! {
-            #impl_state {
+            #impl_client {
                 fn exit(&mut self) -> Result<(), ::converse::error::Error> {
                     let mut stream = std::os::unix::net::UnixStream::connect(self.proc.socket())?;
                     ::converse::protocol::IPCRequest::new(0, vec![]).write(&mut stream)?;

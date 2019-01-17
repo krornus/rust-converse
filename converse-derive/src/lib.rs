@@ -1,12 +1,14 @@
 #![recursion_limit="512"]
 extern crate proc_macro;
 
+use proc_macro2::TokenStream;
 use quote::quote;
 use syn;
 
 mod common;
 mod server;
 mod client;
+mod structure;
 
 #[allow(non_snake_case)]
 #[proc_macro_attribute]

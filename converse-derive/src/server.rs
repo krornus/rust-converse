@@ -8,7 +8,6 @@ pub struct Server<'a> {
     state: common::StateImpl<'a>,
     methods: common::StateMethods<'a>,
     directory: String,
-    ty: TokenStream,
 }
 
 impl<'a> Server<'a> {
@@ -17,26 +16,22 @@ impl<'a> Server<'a> {
         let state = common::StateImpl::new(item);
         let methods = common::StateMethods::new(item);
 
-        let gen: TokenStream = state.params().into_iter().collect();
-        let ty = quote! { Server #gen };
-
         Server {
             state,
             methods,
             directory,
-            ty,
         }
     }
 }
 
 impl<'a> Server<'a> {
-    /* server struct and impls */
     pub fn tokens(&self) -> TokenStream {
 
         let initializer = self.initializer();
         let implementations = self.implementations();
 
-        let ty = &self.ty;
+        let gen = self.state.types().generics();
+        let ty = quote!{ Server #gen };
         let state = self.state.ty();
 
         quote! {
@@ -55,7 +50,11 @@ impl<'a> Server<'a> {
 
         let dir = &self.directory;
         let impl_state = self.state.implement();
-        let ty = &self.ty;
+        let params: TokenStream = self.state.types().params().into_iter()
+            .map(|x| quote!{ #x , })
+            .collect();
+        let gen = quote!{ < #params > };
+        let ty = quote! { Server #gen };
 
         quote! {
             #impl_state {
@@ -79,10 +78,16 @@ impl<'a> Server<'a> {
 
         let core = self.core();
         let endpoints = self.endpoints();
-        let impl_state = self.state.fabricate(self.ty.clone());
+        let params: TokenStream = self.state.types().params().into_iter()
+            .map(|x| quote!{ #x , })
+            .collect();
+
+        let gen = quote!{ < #params > };
+        let ty = quote! { Server #gen };
+        let impl_server = self.state.fabricate(ty);
 
         quote!{
-            #impl_state {
+            #impl_server {
                 #core
                 #endpoints
             }
@@ -116,7 +121,7 @@ impl<'a> Server<'a> {
 
                 let req = ::converse::protocol::IPCRequest::read(&mut stream)?;
 
-                let buf = match req.key {
+                match req.key {
                     0u32 => {
                         self.exit();
                     },
@@ -124,7 +129,7 @@ impl<'a> Server<'a> {
                     _ => {
                         return Err(::converse::error::Error::Server(format!("Invalid function called")));
                     },
-                };
+                }
 
                 Ok(())
             }

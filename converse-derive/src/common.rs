@@ -4,36 +4,206 @@ use syn;
 
 type Arguments = syn::punctuated::Punctuated<syn::Pat, syn::token::Comma>;
 
-pub struct StateImpl<'a> {
-    item: &'a syn::ItemImpl,
+pub struct PhantomMarker {
+    ident: syn::Ident,
+    lifetime: Option<syn::LifetimeDef>,
 }
 
-impl<'a> StateImpl<'a> {
-    pub fn new(item: &'a syn::ItemImpl) -> StateImpl {
-        StateImpl {
-            item: item,
+impl PhantomMarker {
+    fn new(ident: syn::Ident, lifetime: Option<syn::LifetimeDef>) -> Self {
+        PhantomMarker {
+            ident: ident,
+            lifetime: lifetime,
         }
     }
 
-    pub fn ty(&self) -> TokenStream {
-        let ty = &self.item.self_ty;
-        quote! { #ty }
+    fn is_reference(&self) -> bool {
+        self.lifetime.is_some()
     }
 
+    /* T: 'a */
+    fn bounded(&self) -> TokenStream {
+        if self.lifetime.is_some() {
+            let lt = self.lifetime.as_ref().unwrap();
+            let ident = &self.ident;
+            quote! { #ident: #lt }
+        } else {
+            let ident = &self.ident;
+            quote! { #ident }
+        }
+    }
+
+    /* PhantomData */
+    fn instance(&self) -> TokenStream {
+        quote! { ::std::marker::PhantomData }
+    }
+
+    /* T */
+    fn ident(&self) -> TokenStream {
+        let id = &self.ident;
+        quote! { #id }
+    }
+
+    /* PhantomData<&'a T> */
+    fn decl(&self) -> TokenStream {
+        let param = self.decl_param();
+        quote! { ::std::marker::PhantomData < #param > }
+    }
+
+    /* &'a T */
+    fn decl_param(&self) -> TokenStream {
+        if self.lifetime.is_some() {
+            let lt = self.lifetime.as_ref().unwrap();
+            let ident = &self.ident;
+            quote! { & #lt #ident }
+        } else {
+            let ident = &self.ident;
+            quote! { #ident }
+        }
+    }
+}
+
+pub struct PhantomMarkers {
+    markers: Vec<PhantomMarker>,
+}
+
+impl PhantomMarkers {
+    fn new(generics: &syn::Generics) -> Self {
+        PhantomMarkers {
+            markers: Self::mark(generics.clone()),
+        }
+    }
+}
+
+impl PhantomMarkers {
+    fn mark(generics: syn::Generics) -> Vec<PhantomMarker> {
+
+        let mut markers = vec![];
+
+        let mut lifetimes = vec![];
+        let mut types = vec![];
+        let mut type_ids = vec![];
+        for gen in generics.params.into_iter() {
+            match gen {
+                syn::GenericParam::Type(x) => {
+                    type_ids.push(x.ident.clone());
+                    types.push(x);
+                },
+                syn::GenericParam::Lifetime(x) => lifetimes.push(x),
+                _ => eprintln!("Constant generic types are currently unsupported for Converse"),
+            }
+        }
+
+        for ty in types.iter() {
+            markers.push(PhantomMarker::new(ty.ident.clone(), None));
+        }
+
+        /* autogenerate new types which are valid for `lifetime` lifetime */
+        let mut ty_idx = 0;
+        while !lifetimes.is_empty() {
+
+            let lifetime = lifetimes.pop().unwrap();
+            let id = syn::Ident::new(&format!("PhantomType_{}", ty_idx), proc_macro2::Span::call_site());
+
+            /*
+             * this will probably never occur unless
+             * someone is trying to be a dick
+             */
+            if type_ids.contains(&&id) {
+                ty_idx += 1;
+                lifetimes.push(lifetime);
+                continue;
+            }
+
+            markers.push(PhantomMarker::new(id, Some(lifetime)));
+        }
+
+        markers
+    }
+
+    /* PhantomType_0: 'a, PhantomType_1: 'b */
+    fn generics(&self) -> Vec<TokenStream> {
+        self.markers.iter()
+            /* only the newly created types */
+            .filter(|x| x.is_reference())
+            .map(|x| x.bounded())
+            .collect()
+    }
+
+    /* PhantomType_0, PhantomType_1 */
+    fn types(&self) -> Vec<TokenStream> {
+        self.markers.iter()
+            /* only the newly created types */
+            .filter(|x| x.is_reference())
+            .map(|x| x.ident())
+            .collect()
+    }
+
+    /* PhantomData<T>, PhantomData<PhantomType_0>, PhantomData<&'a PhantomType_1> */
+    pub fn decls(&self) -> Vec<TokenStream> {
+        self.markers.iter()
+            .map(|x| x.decl())
+            .collect()
+    }
+
+    /* PhantomData, PhantomDatam, PhantomData */
+    pub fn instances(&self) -> Vec<TokenStream> {
+        self.markers.iter()
+            .map(|x| x.instance())
+            .collect()
+    }
+}
+
+pub struct TypeSystem<'a> {
+    markers: PhantomMarkers,
+    generics: &'a syn::Generics,
+}
+
+impl<'a> TypeSystem<'a> {
+    fn new(generics: &'a syn::Generics) -> Self {
+        TypeSystem {
+            markers: PhantomMarkers::new(generics),
+            generics: generics,
+        }
+    }
+
+    pub fn markers(&self) -> &PhantomMarkers {
+        &self.markers
+    }
+
+    /* 'a, T: 'a */
     pub fn generics(&self) -> TokenStream {
-        let gen = &self.item.generics;
+        let gen = &self.generics;
         quote!( #gen )
     }
 
+    /* 'a, T: 'a, PhantomType_0: 'a */
+    pub fn marked_generics(&self) -> TokenStream {
+        let params = &self.generics.params;
+        let where_clause = &self.generics.where_clause;
+        let marked_params = self.markers.generics().iter()
+            .fold(quote!(#params), |acc, tok| quote! { #acc, #tok });
+        quote! { < #marked_params > #where_clause }
+    }
+
+    /* 'a, T */
     pub fn params(&self) -> Vec<TokenStream> {
         let mut lf = self.lifetimes();
         lf.extend_from_slice(&self.types());
         lf
     }
 
+    /* 'a, T, PhantomType_0 */
+    pub fn marked_params(&self) -> Vec<TokenStream> {
+        let mut params = self.params();
+        let marks = self.markers.types();
+        params.extend_from_slice(&marks);
+
+        params
+    }
 
     pub fn lifetimes(&self) -> Vec<TokenStream> {
-        self.item.generics.params.iter()
+        self.generics.params.iter()
             .filter_map(|x| {
                 match x {
                     syn::GenericParam::Lifetime(x) => Some(x),
@@ -50,7 +220,7 @@ impl<'a> StateImpl<'a> {
     }
 
     pub fn types(&self) -> Vec<TokenStream> {
-        self.item.generics.params.iter()
+        self.generics.params.iter()
             .filter_map(|x| {
                 match x {
                     syn::GenericParam::Type(x) => Some(x),
@@ -63,6 +233,26 @@ impl<'a> StateImpl<'a> {
 
                 quote!{ #attrs #id }
             }).collect()
+    }
+
+}
+
+pub struct StateImpl<'a> {
+    item: &'a syn::ItemImpl,
+    types: TypeSystem<'a>,
+}
+
+impl<'a> StateImpl<'a> {
+    pub fn new(item: &'a syn::ItemImpl) -> StateImpl {
+        StateImpl {
+            item: item,
+            types: TypeSystem::new(&item.generics),
+        }
+    }
+
+    pub fn ty(&self) -> TokenStream {
+        let ty = &self.item.self_ty;
+        quote! { #ty }
     }
 
     pub fn implement(&self) -> TokenStream {
@@ -85,6 +275,10 @@ impl<'a> StateImpl<'a> {
         let generics = &self.item.generics;
 
         quote! { #attrs impl #defaultness #unsafety #generics #ty }
+    }
+
+    pub fn types(&'a self) -> &'a TypeSystem<'a> {
+        &self.types
     }
 }
 
