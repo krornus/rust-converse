@@ -2,45 +2,40 @@ use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned};
 use syn;
 
-use crate::common;
+use crate::structure::Structure;
 
-pub struct Server<'a> {
-    state: common::StateImpl<'a>,
-    methods: common::StateMethods<'a>,
+pub struct Server {
+    structure: Structure,
     directory: String,
 }
 
-impl<'a> Server<'a> {
-    pub fn new(item: &'a syn::ItemImpl, directory: String) -> Self {
+impl Server {
+    pub fn new(item: &syn::ItemImpl, directory: String) -> Self {
 
-        let state = common::StateImpl::new(item);
-        let methods = common::StateMethods::new(item);
+        let ident = syn::Ident::new("Server", proc_macro2::Span::call_site());
+        let mut structure = Structure::from_impl(ident, item.clone());
+        let state_ty = &item.self_ty;
+
+        structure.member(quote! { proc: ::converse::procdir::ProcessDirectory });
+        structure.member(quote! { socket: ::std::os::unix::net::UnixListener  });
+        structure.member(quote! { state: #state_ty  });
 
         Server {
-            state,
-            methods,
+            structure,
             directory,
         }
     }
 }
 
-impl<'a> Server<'a> {
+impl Server {
     pub fn tokens(&self) -> TokenStream {
 
+        let decl = self.structure.declare();
         let initializer = self.initializer();
         let implementations = self.implementations();
 
-        let gen = self.state.types().generics();
-        let ty = quote!{ Server #gen };
-        let state = self.state.ty();
-
         quote! {
-            struct #ty {
-                state: #state,
-                proc: ::converse::procdir::ProcessDirectory,
-                socket: ::std::os::unix::net::UnixListener,
-            }
-
+            #decl
             #initializer
             #implementations
         }
@@ -49,49 +44,44 @@ impl<'a> Server<'a> {
     fn initializer(&self) -> TokenStream {
 
         let dir = &self.directory;
-        let impl_state = self.state.implement();
-        let params: TokenStream = self.state.types().params().into_iter()
-            .map(|x| quote!{ #x , })
-            .collect();
-        let gen = quote!{ < #params > };
-        let ty = quote! { Server #gen };
+        let ty = self.structure.ty();
 
-        quote! {
-            #impl_state {
-                fn server(self) -> Result<#ty, ::converse::error::Error> {
-                    let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
-                    proc.lock()?;
+        /* proc is declared below in the client function */
+        let mut fields = syn::punctuated::Punctuated::new();
+        fields.push( quote! { proc: proc } );
+        fields.push( quote! { socket: socket } );
+        fields.push( quote! { state: self } );
 
-                    let socket = ::std::os::unix::net::UnixListener::bind(proc.socket())?;
+        let auto = self.structure.generics().generated();
+        /* this actually creates the struct */
+        let server = self.structure.initialize(fields);
 
-                    Ok(Server {
-                        state: self,
-                        proc: proc,
-                        socket: socket,
-                    })
-                }
+        let body = quote! {
+            fn server<#auto>(self) -> Result<#ty, ::converse::error::Error> {
+
+                let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
+                proc.lock()?;
+
+                let socket = ::std::os::unix::net::UnixListener::bind(proc.socket())?;
+
+                Ok(#server)
             }
-        }
+        };
+
+        self.structure.implement_parent(body)
     }
 
     fn implementations(&self) -> TokenStream {
 
         let core = self.core();
         let endpoints = self.endpoints();
-        let params: TokenStream = self.state.types().params().into_iter()
-            .map(|x| quote!{ #x , })
-            .collect();
 
-        let gen = quote!{ < #params > };
-        let ty = quote! { Server #gen };
-        let impl_server = self.state.fabricate(ty);
+        let body = quote! {
+            #core
+            #endpoints
+        };
 
-        quote!{
-            #impl_server {
-                #core
-                #endpoints
-            }
-        }
+        self.structure.implement(body)
     }
 
     fn core(&self) -> TokenStream {
@@ -143,19 +133,19 @@ impl<'a> Server<'a> {
 
     fn handle_arms(&self) -> TokenStream {
 
-        let arms = self.methods.methods().iter().enumerate().map(|(i,x)| {
+        let imp = self.structure.implementation();
+        let arms = imp.methods().iter().enumerate().map(|(i,x)| {
 
             let idx = i as u32 + 1;
 
-            let args = (0..x.arguments().len())
+            let args = (0..x.args().len())
                 .map(|i| quote! {
-                    ::converse::serde_cbor::from_slice(&req.argv[#i].data)?,
-                })
-                .fold(quote!(), |acc, tok| quote! { #acc #tok });
+                    ::converse::serde_cbor::from_slice(&req.argv[#i].data)?
+                }).collect();
 
             let ident = x.ident();
 
-            let call = x.call(args);
+            let call = x.call(None, args);
             let ret = quote! { let ret = #call; };
 
             quote_spanned! { ident.span()=>
@@ -173,18 +163,15 @@ impl<'a> Server<'a> {
 
     fn endpoints(&self) -> TokenStream {
 
-        self.methods.methods().iter().map(|x| {
+        let imp = self.structure.implementation();
+        imp.methods().iter().map(|x| {
 
-            let sig = x.fabricate(x.return_type());
+            let args = x.args().iter().map(|x| quote! { #x }).collect();
+            let call = x.call(Some(quote! { state . }), args);
 
-            let args = x.arguments();
-            let call = x.call(quote!{ #args });
+            x.decl(x.ret(), call)
 
-            quote! {
-                #sig { #call }
-            }
-
-        }).fold(quote!(), |acc, tok| quote!{ #acc #tok })
+        }).collect()
     }
 }
 

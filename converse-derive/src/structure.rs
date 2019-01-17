@@ -3,17 +3,17 @@ use quote::quote;
 use proc_macro2::TokenStream;
 
 use syn::{
-    Attribute, FnArg, FnDecl, GenericParam, LifetimeDef,
+    FnArg, GenericParam, LifetimeDef,
     Ident, ImplItem, ImplItemMethod, ItemImpl, Pat,
-    ReturnType, Type, Visibility, WhereClause
+    ReturnType, Type, WhereClause
 };
-use syn::token::{Comma, Default};
+use syn::token::{Eq, Add, Comma};
 use syn::punctuated::{Pair, Punctuated};
 
 pub struct Structure {
     ident: Ident,
     generics: PhantomGenerics,
-    members: Punctuated<Ident, TokenStream>,
+    members: Punctuated<TokenStream, Comma>,
     imp: Implementation,
     parent: ItemImpl,
     phantoms: Vec<Ident>,
@@ -27,7 +27,7 @@ impl Structure {
             ident: ident.clone(),
             generics: PhantomGenerics::from_impl(&imp),
             members: Punctuated::new(),
-            imp: Implementation::from_impl(ident, &imp),
+            imp: Implementation::from_impl(&imp),
             parent: imp,
             phantoms: vec![],
             autovar: 0,
@@ -39,30 +39,49 @@ impl Structure {
         structure
     }
 
+    pub fn member(&mut self, ty: TokenStream) {
+        self.members.push(ty);
+    }
+
+    pub fn generics(&self) -> &PhantomGenerics {
+        &self.generics
+    }
+
+    /* impl on the originaly given type */
     pub fn implement_parent(&self, body: TokenStream) -> TokenStream {
+
         let attrs: TokenStream = self.parent.attrs.iter().map(|x| quote!{ #x }).collect();
         let defaultness = &self.parent.defaultness;
         let unsafety = &self.parent.unsafety;
-        let generics = &self.parent.generics;
         let ty = &self.parent.self_ty;
+        let params = &self.parent.generics.params;
+        let where_clause = &self.parent.generics.where_clause;
 
         quote! {
-            #attrs impl #defaultness #unsafety #generics #ty {
+            #attrs impl #defaultness #unsafety < #params > #ty #where_clause {
                 #body
             }
         }
     }
 
+    pub fn ty(&self) -> TokenStream {
+
+        let ident = &self.ident;
+        let gen_params = self.generics.params();
+
+        quote! { #ident < #gen_params > }
+    }
+
     pub fn declare(&self) -> TokenStream {
+
         let ident = &self.ident;
         let gen_decls = self.generics.decls();
 
         assert!(self.phantoms.len() == self.generics.len());
-
         let markers: TokenStream = self.phantoms.iter()
             .zip(self.generics.markers().iter())
             .map(|(id,mark)| {
-                quote! { #id: #mark }
+                quote! { #id: #mark , }
             }).collect();
 
         let members = &self.members;
@@ -75,18 +94,45 @@ impl Structure {
         }
     }
 
+    pub fn initialize(&self, mut fields: Punctuated<TokenStream, Comma>) -> TokenStream {
+
+        let ident = &self.ident;
+
+        assert!(self.phantoms.len() == self.generics.len());
+        let markers: Vec<TokenStream> = self.phantoms.iter()
+            .zip(self.generics.instances().iter())
+            .map(|(id,instance)| {
+                quote! { #id: #instance }
+            }).collect();
+
+        fields.extend(markers.into_iter());
+
+        quote! {
+            #ident {
+                #fields
+            }
+        }
+    }
+
     pub fn implement(&self, body: TokenStream) -> TokenStream {
 
         let ident = &self.ident;
 
         let gen_decls = self.generics.decls();
         let gen_params = self.generics.params();
+        let where_clause = &self.generics.where_clause;
 
         quote! {
-            impl < #gen_decls > #ident < #gen_params > {
+            impl < #gen_decls > #ident < #gen_params >
+                #where_clause
+            {
                 #body
             }
         }
+    }
+
+    pub fn implementation(&self) -> &Implementation {
+        &self.imp
     }
 
     fn autovar(&mut self) -> Ident {
@@ -96,15 +142,12 @@ impl Structure {
     }
 }
 
-struct Implementation {
-    attrs: Vec<Attribute>,
-    ident: Ident,
-    generics: PhantomGenerics,
+pub struct Implementation {
     methods: Vec<Method>,
 }
 
 impl Implementation {
-    fn from_impl<'a>(ident: Ident, imp: &'a ItemImpl) -> Self {
+    fn from_impl<'a>(imp: &'a ItemImpl) -> Self {
 
         let methods = imp.items.iter()
             .filter_map(|x| match x {
@@ -114,19 +157,17 @@ impl Implementation {
             .map(|x| Method::new(imp.self_ty.clone(), x)).collect();
 
         Implementation {
-            attrs: imp.attrs.clone(),
-            ident: ident,
-            generics: PhantomGenerics::from_impl(imp),
             methods: methods,
         }
     }
 
-    fn methods(&self) -> &Vec<Method> {
+    pub fn methods(&self) -> &Vec<Method> {
         &self.methods
     }
 }
 
-struct Method {
+#[derive(Clone)]
+pub struct Method {
     ty: Box<Type>,
     method: ImplItemMethod,
 }
@@ -153,7 +194,7 @@ impl Method {
     }
 
     /* Get a list of arguments to the function - ignore self */
-    fn args(&self) -> Punctuated<Pat, Comma> {
+    pub fn args(&self) -> Punctuated<Pat, Comma> {
         self.method.sig.decl.inputs.pairs()
             .filter(|x| match x.value() {
                 FnArg::SelfRef(_) => false,
@@ -167,11 +208,11 @@ impl Method {
                         x.punct().map(|x| (**x).clone())
                     )),
                     FnArg::Inferred(x) => {
-                        eprintln!("warning: ingored inferred variable {}", quote!(x));
+                        eprintln!("warning: ingored inferred variable {}", quote!(#x));
                         None
                     },
                     FnArg::Ignored(x) => {
-                        eprintln!("warning: ingored variable {}", quote!(x));
+                        eprintln!("warning: ingored variable {}", quote!(#x));
                         None
                     },
                     _ => None,
@@ -180,16 +221,20 @@ impl Method {
             .collect()
     }
 
+    pub fn ident(&self) -> &Ident {
+        &self.method.sig.ident
+    }
+
     /* Get the return type */
-    fn ret(&self) -> TokenStream {
+    pub fn ret(&self) -> TokenStream {
         match &self.method.sig.decl.output {
             ReturnType::Default => quote! { () },
             ReturnType::Type(_, x) => quote! { #x },
         }
     }
 
-    /* Create the function declaration stream */
-    fn decl(&self, ret: TokenStream) -> TokenStream {
+    /* Create a function declaration stream */
+    pub fn decl(&self, ret: TokenStream, body: TokenStream) -> TokenStream {
 
         let sig = &self.method.sig;
         let decl = &sig.decl;
@@ -209,24 +254,29 @@ impl Method {
         let generics = &decl.generics;
         let inputs = &decl.inputs;
 
-        quote! { #vis #defaultness #constness #unsafety #asyncness #abi fn #ident #generics ( #inputs ) -> #ret }
+        quote! {
+            #vis #defaultness #constness #unsafety #asyncness #abi
+            fn #ident #generics ( #inputs ) -> #ret {
+                #body
+            }
+        }
     }
 
     /* Call the function with args */
-    fn call(&self, args: Punctuated<TokenStream, Comma>) -> TokenStream {
+    pub fn call(&self, path: Option<TokenStream>, args: Punctuated<TokenStream, Comma>) -> TokenStream {
 
         let ident = &self.method.sig.ident;
 
         if self.is_static() {
             let ty = &self.ty;
-            quote! { #ty::#ident(#args) }
+            quote! { #ty :: #path #ident(#args) }
         } else {
-            quote! { self.state.#ident(#args) }
+            quote! { self . #path #ident(#args) }
         }
     }
 }
 
-struct PhantomGenerics {
+pub struct PhantomGenerics {
     generics: Vec<PhantomGeneric>,
     where_clause: Option<WhereClause>,
 }
@@ -243,8 +293,12 @@ impl PhantomGenerics {
         for gen in imp.generics.params.iter() {
             match gen {
                 GenericParam::Type(x) => {
+
+                    let punct = x.bounds.iter().map(|x| quote!(#x)).collect();
+                    let bounds = PhantomBounds::new(None, punct, x.eq_token.clone(), x.default.clone());
+
                     type_ids.push(&x.ident);
-                    generics.push(PhantomGeneric::new(x.ident.clone(), None));
+                    generics.push(PhantomGeneric::new(x.ident.clone(), bounds));
                 },
                 GenericParam::Lifetime(x) => lifetimes.push(x),
                 _ => eprintln!("Constant generic types are currently unsupported for Converse"),
@@ -266,8 +320,12 @@ impl PhantomGenerics {
                 continue;
             }
 
-            generics.push(PhantomGeneric::new(id, Some(lifetime.clone())));
+            let bounds = PhantomBounds::new(Some(lifetime.clone()), Punctuated::new(), None, None);
+            generics.push(PhantomGeneric::new(id, bounds));
         }
+
+        /* lifetimes first */
+        generics.reverse();
 
         PhantomGenerics {
             generics: generics,
@@ -275,20 +333,41 @@ impl PhantomGenerics {
         }
     }
 
-    /* T: 'a , U: 'b */
+    pub fn generated(&self) -> Punctuated<TokenStream, Comma> {
+        self.generics.iter()
+            .filter(|x| x.is_reference())
+            .map(PhantomGeneric::ident)
+            .collect()
+    }
+
+    /* 'a, T: 'a , U: 'b */
     fn decls(&self) -> Punctuated<TokenStream, Comma> {
-        self.generics.iter().map(PhantomGeneric::decl).collect()
+        /* get lifetimes */
+        self.generics.iter()
+            .filter_map(PhantomGeneric::lifetime)
+            .chain(
+                /* get types */
+                self.generics.iter().map(PhantomGeneric::decl)
+            )
+            .collect()
     }
 
     /* 'a, T */
     fn params(&self) -> Punctuated<TokenStream, Comma> {
-        self.generics.iter().map(PhantomGeneric::ident).collect()
+        self.generics.iter()
+            .filter_map(PhantomGeneric::lifetime)
+            .chain(
+                /* get types */
+                self.generics.iter().map(PhantomGeneric::ident)
+            )
+            .collect()
     }
 
     /* PhantomData<&'a T>, ... */
     fn markers(&self) -> Vec<TokenStream> {
         self.generics.iter().map(PhantomGeneric::marker).collect()
     }
+
 
     fn instances(&self) -> Vec<TokenStream> {
         self.generics.iter().map(PhantomGeneric::instance).collect()
@@ -301,42 +380,38 @@ impl PhantomGenerics {
 
 struct PhantomGeneric {
     ident: Ident,
-    lifetime: Option<LifetimeDef>,
+    bounds: PhantomBounds,
 }
 
 impl PhantomGeneric {
-    fn new(ident: Ident, lifetime: Option<LifetimeDef>) -> Self {
+    fn new(ident: Ident, bounds: PhantomBounds) -> Self {
         PhantomGeneric {
             ident: ident,
-            lifetime: lifetime,
+            bounds: bounds,
         }
     }
 
+    /* lifetime is only some when constructed as a reference above */
     fn is_reference(&self) -> bool {
-        self.lifetime.is_some()
+        self.bounds.lifetime.is_some()
     }
 
     /* T: 'a */
     fn decl(&self) -> TokenStream {
-        if self.lifetime.is_some() {
-            let lt = self.lifetime.as_ref().unwrap();
-            let ident = &self.ident;
-            quote! { #ident: #lt }
-        } else {
-            let ident = &self.ident;
-            quote! { #ident }
-        }
+        let ident = &self.ident;
+        let bounds = self.bounds.bounds();
+        quote! { #ident #bounds }
     }
 
-    /* If ref: lifetime id, if type: type id */
+    /* 'a */
+    fn lifetime(&self) -> Option<TokenStream> {
+        self.bounds.lifetime.as_ref().map(|x| quote! { #x })
+    }
+
+    /* T */
     fn ident(&self) -> TokenStream {
-        if self.lifetime.is_some() {
-            let lt = self.lifetime.as_ref().unwrap();
-            quote! { #lt }
-        } else {
-            let ident = &self.ident;
-            quote! { #ident }
-        }
+        let ident = &self.ident;
+        quote! { #ident }
     }
 
     /* PhantomData<&'a T> */
@@ -347,8 +422,8 @@ impl PhantomGeneric {
 
     /* &'a T */
     fn marker_type(&self) -> TokenStream {
-        if self.lifetime.is_some() {
-            let lt = self.lifetime.as_ref().unwrap();
+        if self.bounds.lifetime.is_some() {
+            let lt = self.bounds.lifetime.as_ref().unwrap();
             let ident = &self.ident;
             quote! { & #lt #ident }
         } else {
@@ -360,5 +435,45 @@ impl PhantomGeneric {
     /* PhantomData */
     fn instance(&self) -> TokenStream {
         quote! { ::std::marker::PhantomData }
+    }
+}
+
+struct PhantomBounds {
+    lifetime: Option<LifetimeDef>,
+    bounds: Punctuated<TokenStream, Add>,
+    eq_token: Option<Eq>,
+    default: Option<Type>,
+}
+
+impl PhantomBounds {
+    fn new(
+        lifetime: Option<LifetimeDef>,
+        bounds: Punctuated<TokenStream, Add>,
+        eq_token: Option<Eq>,
+        default: Option<Type>,
+    ) -> Self {
+        PhantomBounds {
+            lifetime,
+            bounds,
+            eq_token,
+            default,
+        }
+    }
+
+    fn bounds(&self) -> Option<TokenStream> {
+        if self.lifetime.is_none() && self.bounds.is_empty() {
+            None
+        } else {
+            /* prepend the bounds with the explicit lifetime */
+            let mut punct: Punctuated<TokenStream, Add> = self.lifetime.iter().map(|x| quote! { #x }).collect();
+            punct.extend(self.bounds.clone().into_iter());
+
+            let eq = &self.eq_token;
+            let default = &self.default;
+
+            Some(quote! {
+                : #punct #eq #default
+            })
+        }
     }
 }

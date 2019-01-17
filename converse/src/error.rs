@@ -9,6 +9,7 @@ use std::io;
 #[derive(Debug)]
 pub enum Error {
     Server(String),
+    Client(String),
     ProcessDirectory(String),
     IOError(io::Error),
     FromUtf8Error(FromUtf8Error),
@@ -19,11 +20,11 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Server(s) => write!(f, "Server error: {}", s),
-            Error::ProcessDirectory(s) => write!(f, "Server error: {}", s),
+            Error::Client(s) => write!(f, "Client error: {}", s),
+            Error::ProcessDirectory(s) => write!(f, "Process directory error: {}", s),
             Error::IOError(e) => write!(f, "{}", e),
             Error::FromUtf8Error(e) => write!(f, "{}", e),
             Error::Serialize(e) => write!(f, "{}", e),
-            _ => write!(f, "Rigor has encountered an unknown error"),
         }
     }
 }

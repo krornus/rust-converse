@@ -2,151 +2,133 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn;
 
-use crate::common;
+use crate::structure::Structure;
 
-pub struct Client<'a> {
-    state: common::StateImpl<'a>,
-    methods: common::StateMethods<'a>,
+pub struct Client {
+    structure: Structure,
     directory: String,
 }
 
-impl<'a> Client<'a> {
-    pub fn new(item: &'a syn::ItemImpl, directory: String) -> Self {
+impl Client {
+    pub fn new(item: &syn::ItemImpl, directory: String) -> Self {
 
-        let state = common::StateImpl::new(item);
-        let methods = common::StateMethods::new(item);
+        let ident = syn::Ident::new("Client", proc_macro2::Span::call_site());
+        let mut structure = Structure::from_impl(ident, item.clone());
+
+        structure.member(quote! { proc: ::converse::procdir::ProcessDirectory });
 
         Client {
-            state,
-            methods,
-            directory,
+            structure: structure,
+            directory: directory,
         }
     }
 }
 
-impl<'a> Client<'a> {
+impl Client {
     /* server struct and impls */
     pub fn tokens(&self) -> TokenStream {
 
+        let decl = self.structure.declare();
         let initializer = self.initializer();
         let implementations = self.implementations();
 
-        let gen = self.state.types().marked_generics();
-        let ty = quote!{ Client #gen };
-
-        let phantom = self.state.types().markers();
-        let markers: TokenStream = phantom.decls().iter().enumerate()
-            .map(|(i,x)| {
-                let id = syn::Ident::new(&format!("marker_{}", i), proc_macro2::Span::call_site());
-                quote! { #id: #x , }
-            }).collect();
-
         quote! {
-            struct #ty {
-                proc: ::converse::procdir::ProcessDirectory,
-                #markers
-            }
-
+            #decl
             #initializer
             #implementations
         }
     }
 
     fn initializer(&self) -> TokenStream {
+
         let dir = &self.directory;
-        let impl_state = self.state.implement();
+        let ty = self.structure.ty();
 
-        let params: TokenStream = self.state.types().marked_params().into_iter()
-            .map(|x| quote!{ #x , })
-            .collect();
-        let gen = quote! { < #params > };
-        let ty = quote! { Client #gen };
+        /* proc is declared below in the client function */
+        let mut fields = syn::punctuated::Punctuated::new();
+        fields.push( quote! { proc: proc } );
 
+        let auto = self.structure.generics().generated();
+        /* this actually creates the struct */
+        let client = self.structure.initialize(fields);
 
-        let phantom = self.state.types().markers();
-        let markers: TokenStream = phantom.instances().iter().enumerate()
-            .map(|(i,x)| {
-                let id = syn::Ident::new(&format!("marker_{}", i), proc_macro2::Span::call_site());
-                quote! { #id: #x , }
-            }).collect();
+        let body = quote! {
+            fn client<#auto>() -> Result<#ty, ::converse::error::Error> {
+                let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
 
-        quote! {
-            #impl_state {
-                fn client() -> Result<#ty, ::converse::error::Error> {
-                    let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
-
-                    if !proc.socket().exists() {
-                        return Err(::converse::error::Error::Server(
-                            format!("Client error: socket file '{}' does not exist.", proc.socket().display())));
-                    }
-
-                    if let Ok(()) = proc.lock() {
-                        return Err(::converse::error::Error::Server(
-                            format!("Client error: process {} is not locked ('{}').", #dir, proc.lockfile().display())));
-                    }
-
-                    Ok(Client {
-                        proc: proc,
-                        #markers
-                    })
+                if !proc.socket().exists() {
+                    return Err(::converse::error::Error::Client(
+                        format!("Socket file '{}' does not exist.", proc.socket().display())));
                 }
+
+                if let Ok(()) = proc.lock() {
+                    return Err(::converse::error::Error::Server(
+                        format!("Process {} is not locked ('{}').", #dir, proc.lockfile().display())));
+                }
+
+                Ok(#client)
             }
-        }
+        };
+
+        self.structure.implement_parent(body)
     }
 
     fn implementations(&self) -> TokenStream {
 
-        let params: TokenStream = self.state.types().marked_params().into_iter()
-            .map(|x| quote!{ #x , })
-            .collect();
-        let gen = quote!{ < #params > };
-        let ty = quote! { Client #gen };
-        let impl_client = self.state.fabricate(ty);
-
         let endpoints = self.endpoints();
 
-        quote! {
-            #impl_client {
-                fn exit(&mut self) -> Result<(), ::converse::error::Error> {
-                    let mut stream = std::os::unix::net::UnixStream::connect(self.proc.socket())?;
-                    ::converse::protocol::IPCRequest::new(0, vec![]).write(&mut stream)?;
-                    Ok(())
-                }
-                #endpoints
+        let body = quote! {
+            fn exit(&mut self) -> Result<(), ::converse::error::Error> {
+                let mut stream = std::os::unix::net::UnixStream::connect(self.proc.socket())?;
+                ::converse::protocol::IPCRequest::new(0, vec![]).write(&mut stream)?;
+                Ok(())
             }
-        }
+
+            #endpoints
+        };
+
+        self.structure.implement(body)
     }
 
     fn endpoints(&self) -> TokenStream {
 
-        self.methods.methods().iter().enumerate().map(|(i,x)| {
+        let imp = self.structure.implementation();
 
-            let output = x.return_type();
-            let ret = quote!{ Result<#output, ::converse::error::Error> };
-            let sig = x.fabricate(ret);
+        /*
+         * for each method, make a new method of the same name
+         * which connects, deserializes args, serializes result
+         */
+        imp.methods().iter().enumerate().map(|(i,x)| {
 
-            let args = x.arguments();
+            let ret = x.ret();
+            let args = x.args();
+
             let idx = (i + 1) as u32;
-
             let argc = args.len();
-            let argv = args.iter().map(|arg| {
-                quote! {
+
+            let init = quote! { let mut argv = Vec::with_capacity(#argc); };
+
+            let argv = args.iter()
+                .map(|arg| quote! {
                     argv.push(::converse::serde_cbor::to_vec(&#arg)?);
-                }
-            }).fold(quote! { let mut argv = Vec::with_capacity(#argc); }, |acc, tok| { quote! { #acc #tok } });
+                })
+                .fold(init, |acc, tok| quote! {
+                     #acc #tok
+                 });
 
-            quote! {
-                #sig {
-                    let mut stream = std::os::unix::net::UnixStream::connect(self.proc.socket())?;
+            let body = quote! {
+                let mut stream = std::os::unix::net::UnixStream::connect(self.proc.socket())?;
 
-                    #argv
+                #argv
 
-                    ::converse::protocol::IPCRequest::new(#idx, argv).write(&mut stream)?;
-                    let res = ::converse::protocol::IPCBuffer::read(&mut stream)?;
+                ::converse::protocol::IPCRequest::new(#idx, argv).write(&mut stream)?;
+                let res = ::converse::protocol::IPCBuffer::read(&mut stream)?;
 
-                    Ok(::converse::serde_cbor::from_slice(&res.data)?)
-                }
-            }
+                Ok(::converse::serde_cbor::from_slice(&res.data)?)
+            };
+
+
+            x.decl(quote! { Result<#ret, ::converse::error::Error> }, body)
 
         }).collect()
     }

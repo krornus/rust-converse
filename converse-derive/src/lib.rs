@@ -1,11 +1,9 @@
 #![recursion_limit="512"]
 extern crate proc_macro;
 
-use proc_macro2::TokenStream;
 use quote::quote;
 use syn;
 
-mod common;
 mod server;
 mod client;
 mod structure;
@@ -30,7 +28,7 @@ pub fn Converse(attr: proc_macro::TokenStream, item: proc_macro::TokenStream) ->
         #client
     };
 
-    println!("{}", tokens);
+    // println!("{}", tokens);
 
     tokens.into()
 }
