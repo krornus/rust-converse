@@ -2,5 +2,4 @@
 members = [
     "converse-derive",
     "converse",
-    "example",
 ]

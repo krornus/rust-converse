@@ -43,7 +43,7 @@ impl<T: Serialize + Clone + DeserializeOwned> Playlist<T> {
 fn main() {
     match run() {
         Ok(_) => {},
-        Err(e) => { eprintln!("\x1b[1;31m[-]\x1b[m: {}", e); },
+        Err(e) => { eprintln!("\x1b[1;31m[-]\x1b[m {}", e); },
     }
 }
 
