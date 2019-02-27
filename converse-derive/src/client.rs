@@ -61,11 +61,6 @@ impl Client {
                         format!("Socket file '{}' does not exist.", proc.socket().display())));
                 }
 
-                if let Ok(()) = proc.lock() {
-                    return Err(::converse::error::Error::Server(
-                        format!("Process {} is not locked ('{}').", #dir, proc.lockfile().display())));
-                }
-
                 Ok(#client)
             }
         };

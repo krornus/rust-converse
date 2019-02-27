@@ -27,7 +27,6 @@ impl ProcessDirectory {
             fs::create_dir(&proc.path)?;
         }
 
-
         Ok(proc)
     }
 

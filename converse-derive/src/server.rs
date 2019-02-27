@@ -100,7 +100,6 @@ impl Server {
                     }
                 }).expect("Failed to set interrupt handler for server");
 
-
                 loop {
                     let (stream, _) = self.socket.accept()?;
                     self.handle(stream)?;
