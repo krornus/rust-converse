@@ -57,7 +57,7 @@ impl Server {
         let server = self.structure.initialize(fields);
 
         let body = quote! {
-            fn server<#auto>(self) -> Result<#ty, ::converse::error::Error> {
+            pub fn server<#auto>(self) -> Result<#ty, ::converse::error::Error> {
 
                 let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
                 proc.lock()?;
@@ -89,7 +89,7 @@ impl Server {
         let matches = self.handle_arms();
 
         quote! {
-            fn run(&mut self) -> Result<(), ::converse::error::Error> {
+            pub fn run(&mut self) -> Result<(), ::converse::error::Error> {
 
                 let dir = self.proc.path().clone();
                 ::converse::ctrlc::set_handler(move || {

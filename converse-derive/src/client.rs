@@ -53,7 +53,7 @@ impl Client {
         let client = self.structure.initialize(fields);
 
         let body = quote! {
-            fn client<#auto>() -> Result<#ty, ::converse::error::Error> {
+            pub fn client<#auto>() -> Result<#ty, ::converse::error::Error> {
                 let proc = ::converse::procdir::ProcessDirectory::new(#dir)?;
 
                 if !proc.socket().exists() {
